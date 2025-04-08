@@ -1,0 +1,14 @@
+.git/
+.github/
+.idea/
+.vscode/
+docker-compose.yml
+Dockerfile
+README.md
+vendor/
+var/
+node_modules/
+tests/
+phpunit.xml.dist
+# .env
+# TODO: .env

@@ -1,0 +1,75 @@
+services:
+  app:
+    container_name: taskmanager_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Pull configuration from the .env file
+      # Ensure these match the keys you define in your main .env file
+      - APP_ENV=${APP_ENV:-dev} # Default to 'dev' locally
+      - APP_SECRET=${APP_SECRET?You must set APP_SECRET in .env}
+      # Use the Docker service name 'db' instead of 127.0.0.1
+      - DATABASE_URL=${DATABASE_URL?You must set DATABASE_URL in .env}
+      # Use the correct variable name and Docker service name 'redis'
+      - REDIS_DSN=${REDIS_DSN?You must set REDIS_DSN in .env}
+      # Add MESSENGER_TRANSPORT_DSN if your app uses the Symfony Messenger component
+      # - MESSENGER_TRANSPORT_DSN=${MESSENGER_TRANSPORT_DSN:-doctrine://default}
+    volumes:
+      # Mount code for development (optional, remove for prod-like testing)
+      # - .:/app:cached
+      # Don't mount vendor in dev, let container handle it unless specific needs
+      # - /app/vendor/
+      # Mount tmp dir if needed by RoadRunner uploads etc.
+      - app_tmp:/tmp
+    ports:
+      - "${APP_PORT:-8080}:8080" # Map host port 8080 (or from .env) to container 8080
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started # Redis starts fast, healthcheck optional
+    networks:
+      - taskmanager_net
+
+  db:
+    image: postgres:15-alpine
+    container_name: taskmanager_db
+    restart: unless-stopped
+    environment:
+      # Match the user/db from the default DATABASE_URL in .env
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      # Use a secure password set in your .env file
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD?You must set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-task_manager}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskmanager_net
+
+  redis:
+    image: redis:6-alpine
+    container_name: taskmanager_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - taskmanager_net
+
+networks:
+  taskmanager_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  app_tmp:
+    driver: local
