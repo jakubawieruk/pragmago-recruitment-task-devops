@@ -1,0 +1,193 @@
+name: Task Manager CI/CD
+
+on:  
+  push:
+    branches: [ main ]
+
+  pull_request:
+    branches: [ main ]
+
+  # Allow to run this workflow manually from the UI
+  workflow_dispatch:
+
+env:
+  # Use the correct DB user/name for testing based on previous fixes
+  # Use dummy password here; services block will define the actual test password
+  PHP_VERSION: '8.1'
+  DB_USER: app
+  DB_NAME: app_test
+  DB_PASSWORD: test_password_dummy # Dummy password for safety, actual used in services block
+  POSTGRES_VERSION: '16' # Match Dockerfile/local setup if possible
+  REDIS_VERSION: '6'     # Match Dockerfile/local setup if possible
+
+  # GHCR Image name - automatically uses your repo owner and name
+  DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+
+jobs:
+  ###########################################
+  # Job 1: Linting and Static Analysis      #
+  ###########################################
+  lint-and-static-analysis:
+    name: Lint & Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          # TODO: Ensure extensions match Dockerfile base stage + sockets for RoadRunner Bundle
+          extensions: mbstring, xml, ctype, iconv, pdo, pdo_pgsql, redis, zip, intl, sockets, opcache
+          tools: composer
+          coverage: none
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Run PHPStan (Static Analysis)
+        run: composer stan
+
+      - name: Run ECS (Code Style Check)
+        run: composer cs
+
+  ###########################################
+  # Job 2: Run Tests                        #
+  ###########################################
+  tests:
+    name: Run Tests (Unit & Functional)
+    runs-on: ubuntu-latest
+    needs: lint-and-static-analysis
+
+    services:
+      db_test:
+        image: postgres:${{ env.POSTGRES_VERSION }}-alpine
+        env:
+          POSTGRES_DB: ${{ env.DB_NAME }}
+          POSTGRES_USER: ${{ env.DB_USER }}
+          POSTGRES_PASSWORD: test_password # Use a simple password for CI service
+        ports:
+          - 5432:5432
+        options: >- # Healthcheck options
+          --health-cmd pg_isready -U ${{ env.DB_USER }} -d ${{ env.DB_NAME }}
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis_test:
+        image: redis:${{ env.REDIS_VERSION }}-alpine
+        ports:
+          - 6379:6379
+        options: >- # Optional healthcheck for Redis
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, xml, ctype, iconv, pdo, pdo_pgsql, redis, zip, intl, sockets, opcache
+          tools: composer
+          coverage: none
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Wait for Services
+        # Simple sleep; robust alternative is using a wait-for-it script
+        run: sleep 15
+
+      - name: Run Migrations for Test DB
+        # Override env vars to connect to services via mapped ports on localhost
+        run: php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
+        env:
+          APP_ENV: test
+          # Use 127.0.0.1 because services ports are mapped to the runner host
+          DATABASE_URL: "postgresql://${{ env.DB_USER }}:test_password@127.0.0.1:5432/${{ env.DB_NAME }}?serverVersion=${{ env.POSTGRES_VERSION }}&charset=utf8"
+          REDIS_DSN: "redis://127.0.0.1:6379"
+          # Symfony needs APP_SECRET even for console commands sometimes
+          APP_SECRET: test_secret_dummy_for_ci
+
+      - name: Run PHPUnit Tests
+        run: composer test
+        env:
+          APP_ENV: test
+          DATABASE_URL: "postgresql://${{ env.DB_USER }}:test_password@127.0.0.1:5432/${{ env.DB_NAME }}?serverVersion=${{ env.POSTGRES_VERSION }}&charset=utf8"
+          REDIS_DSN: "redis://127.0.0.1:6379"
+          APP_SECRET: test_secret_dummy_for_ci
+        # NOTE: We expect tests for the DELETE endpoint to fail due to the known 'Detached entity' bug.
+        # This job *will* fail if any tests fail, accurately reflecting the application state.
+
+  ###########################################
+  # Job 3: Build & Push Docker Image        #
+  ###########################################
+  build-and-push-image:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: tests
+    # Only run this job on pushes to the main branch, NOT on pull requests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE_NAME }}
+          tags: |
+            type=sha # Tag with the git commit SHA (e.g., ghcr.io/owner/repo:sha-a1b2c3d)
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }} # Tag 'latest' only for main branch
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha # Enable build cache from GitHub Actions Cache
+          cache-to: type=gha,mode=max # Write build cache back to GitHub Actions Cache
