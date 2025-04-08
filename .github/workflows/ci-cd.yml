@@ -17,8 +17,8 @@ env:
   DB_USER: app
   DB_NAME: app_test
   DB_PASSWORD: test_password_dummy # Dummy password for safety, actual used in services block
-  POSTGRES_VERSION: '16' # Match Dockerfile/local setup if possible
-  REDIS_VERSION: '6'     # Match Dockerfile/local setup if possible
+  POSTGRES_VERSION: '15'
+  REDIS_VERSION: '6'
 
   # GHCR Image name - automatically uses your repo owner and name
   DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
@@ -75,20 +75,20 @@ jobs:
 
     services:
       db_test:
-        image: postgres:${{ env.POSTGRES_VERSION }}-alpine
+        image: postgres:16-alpine
         env:
-          POSTGRES_DB: ${{ env.DB_NAME }}
-          POSTGRES_USER: ${{ env.DB_USER }}
+          POSTGRES_DB: app
+          POSTGRES_USER: app
           POSTGRES_PASSWORD: test_password # Use a simple password for CI service
         ports:
           - 5432:5432
         options: >- # Healthcheck options
-          --health-cmd pg_isready -U ${{ env.DB_USER }} -d ${{ env.DB_NAME }}
+          --health-cmd pg_isready -U app -d app
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
       redis_test:
-        image: redis:${{ env.REDIS_VERSION }}-alpine
+        image: redis:6-alpine
         ports:
           - 6379:6379
         options: >- # Optional healthcheck for Redis

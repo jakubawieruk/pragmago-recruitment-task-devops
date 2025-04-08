@@ -7,12 +7,9 @@ services:
     restart: unless-stopped
     environment:
       # Pull configuration from the .env file
-      # Ensure these match the keys you define in your main .env file
       - APP_ENV=${APP_ENV:-dev} # Default to 'dev' locally
       - APP_SECRET=${APP_SECRET?You must set APP_SECRET in .env}
-      # Use the Docker service name 'db' instead of 127.0.0.1
       - DATABASE_URL=${DATABASE_URL?You must set DATABASE_URL in .env}
-      # Use the correct variable name and Docker service name 'redis'
       - REDIS_DSN=${REDIS_DSN?You must set REDIS_DSN in .env}
       # Add MESSENGER_TRANSPORT_DSN if your app uses the Symfony Messenger component
       # - MESSENGER_TRANSPORT_DSN=${MESSENGER_TRANSPORT_DSN:-doctrine://default}
